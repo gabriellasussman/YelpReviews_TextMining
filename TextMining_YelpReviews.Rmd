@@ -1,0 +1,1704 @@
+---
+title: "Assignment 3 - Text Mining Yelp Reviews"
+author: "Gabriella,George,Soumya,Megan"
+date: "4/8/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE, message=FALSE}
+
+library(ggplot2)
+library(reshape2)
+library(tidyr)
+library(tidyverse)
+library(broom)
+library(magrittr)
+library(dplyr)
+library(textdata)
+library(tidytext)
+library(SnowballC)
+library(textstem)
+library(ranger)
+library(rsample)
+library(e1071)
+library(pROC)
+library(corrplot)
+library(glmnet)
+library(ROCR)
+library(caret)
+```
+
+```{r results=FALSE, cache=TRUE}
+
+# the data file uses ';' as delimiter, and for this we use the read_csv2 function
+resReviewsData <- read_csv2('yelpResReviewsSample.csv')
+
+#number of reviews by star-rating
+starFreq <- resReviewsData %>% group_by(stars) %>% count()
+hist(resReviewsData$stars) 
+
+```
+As shown in the graph above, we can see that most of the reviews are given either a 5-star or 4-star rating, with 5-stars and 4-stars ratings making up around 63% of the total number of reviews.The frequency of the star ratings shows an upward increasing trend from 1-star to 5-stars.
+
+### How will you use the star ratings to obtain a label indicating ‘positive’ or ‘negative’ – explain using the data, graphs, etc.?
+
+The star ratings can be used to categorize reviews as positive or negative as 4 and 5 star reviews would clearly indicate a positive rating while a 1 and 2 star review would indicate a negative review. As 3 stars is the median value in a 5 star rating, it will be hard to categorize 3 star reviews without further exploration, so to determine how we should categorize 3-star reviews, we calculate the mean based on the distribution of the star ratings using the following formula:
+```{r Positive & Negative Labels}
+
+avg_star_rating = sum(starFreq$stars*starFreq$n)/sum(starFreq$n)
+avg_star_rating
+
+```
+Which gives us the average star rating, 3.6531. However, we feel that this may not be the most accurate way of determining whether a 3-star rating is considered positive or negative experiences are not always split equally, as people may be more likely to have more positive experiences than negative experiences with a restaurant, which would mean that the number of positive ratings would be naturally higher than negative ratings, so using the average rating as the threshold for classifying a star rating as positive or negative may not be accurate. So, we decide to analyse the distribution of “funny”, “cool” and “useful” ratings for each star rating as well.
+
+### Do star ratings have any relation to ‘funny’, ‘cool’, ‘useful’? # Is this what you expected?
+```{r Star Ratings vs 3 Words Scatterplot}
+
+#Distribution of the vote types per star rating
+ggplot(resReviewsData, aes(x= funny, y=stars)) +geom_point()
+ggplot(resReviewsData, aes(x= cool, y=stars)) +geom_point()
+ggplot(resReviewsData, aes(x= useful, y=stars)) +geom_point()
+
+```
+
+As shown in the scatterplot distribution plots above, “funny”, “cool” and “useful” all show a similar pattern between the different star-ratings, where 4-star and 5-star ratings seem to have more “outliers” with higher values, whereas the values for 1-star and 2-star ratings generally remain below 20. This is not surprising as “funny”, “cool” and “useful” are words that lean more towards positive sentiment and thus we expected that the higher the star rating, the higher the value. From this we can see that 3-star ratings seem to have higher values of the 3 words, which suggests that 3-star ratings may be positive instead of negative.
+
+We also created bar plots, calculated the total number of up-votes for each of the 3 words for each star rating, and created a table that includes the frequency percentages and cumulative frequencies of each word per rating as shown below.
+```{r Star Ratings vs 3 Words Barplot}
+
+#Combining the 3 columns into 1 column and then plotting a stacked bar-graph
+voteTypeDF <- melt((resReviewsData[, c("stars", "funny", "cool", "useful")]), id.vars='stars')
+
+ggplot(voteTypeDF, aes(x=stars, y=value, fill=variable)) +
+    geom_bar(stat='identity', position='stack')
+
+ggplot(voteTypeDF, aes(x=stars, y=value, fill=variable)) +
+    geom_bar(stat='identity', position='dodge')
+
+#summarizing data by star ratings with statistics
+revData <- resReviewsData %>% group_by(stars) %>% summarise(Funny = sum(funny), Cool = sum(cool), Useful = sum(useful)) %>% left_join(starFreq)
+revData <- arrange(revData, desc(stars))
+revData <- revData %>% mutate(Freq_Perc=n/sum(n),Cum_Freq=cumsum(n),Cum_Freq_Perc=cumsum(n)/sum(n))
+revData
+
+```
+Similar to our distribution plot, the bar plots and table show that the higher 5-star and 4-star ratings overall have higher values of “funny”, “cool” and “useful”. One interesting thing that we observed however, was that for “funny” and “useful”, the 1-star ratings seemed to have slightly higher values compared to 2-star ratings. Overall however, we can see from this that the 3 words are generally associated with higher star ratings.
+
+To explore this further, we also created a table to take into consideration the average values for each word per star rating, and overall average to account for the imbalance of the distribution of the different star ratings.
+```{r Summarized Star Rating Statistics}
+
+#summarizing data by star ratings with statistics on averages
+voteTypeDist <- revData[, c("stars", "n", "Funny", "Cool", "Useful")] %>% mutate(Funny_avg=Funny/n, Cool_avg=Cool/n, Useful_avg=Useful/n, Overall_Avg=(Funny+Cool+Useful)/n)
+voteTypeDist <- voteTypeDist %>% group_by(stars)
+voteTypeDist
+
+```
+As shown above, when taking into consideration the average value of each word per post, it seems that for “funny”, reviews with 1-star ratings are the most likely to receive “funny” up-votes, with the average number of “funny” up-votes increasing as the star rating decreases.  Conversely for “cool”, 4-star ratings are the most likely to receive “cool” up-votes, with a pattern generally showing that the average number of “cool” up-votes increases as the star rating increases. For “useful”, it seems that the average is in more of a normal distribution, with 3-star ratings having the highest average value, followed by 2-star and 4-star ratings. This is not that surprising as people viewing the reviews and up-voting the reviews using the 3 feature words may find that a more negative review may have more “useful” information in it, for example, one may find that someone recommending others to not to order a certain dish a restaurant due to their own bad experience with it might be seen as useful to the viewer to help them avoid a negative experience themselves.Overall however, we still see that on average, 4-star and 3-star ratings seem to have higher average values for the 3 words.
+
+We use a correlation plot to see which of the 3 terms are most associated with eachother
+```{r Correlation Plot of Funny, Cool, Useful}
+#correlation between funny, cool and useful
+
+# Corr Plot - "Funny" and "Cool"
+ggplot(resReviewsData) +
+  aes(x = funny, y = cool) +
+  geom_point(colour = "#0c4c8a") +
+  theme_minimal() + geom_smooth(method=lm, se=FALSE)
+
+cat("Funny | Cool: ", summary(lm(funny ~ cool, data=resReviewsData))$r.squared)
+cat(" ")
+
+# Corr Plot - "Useful" and "Cool"
+ggplot(resReviewsData) +
+  aes(x = useful, y = cool) +
+  geom_point(colour = "#0c4c8a") +
+  theme_minimal() + geom_smooth(method=lm, se=FALSE)
+
+cat("Useful | Cool: ", summary(lm(useful ~ cool, data=resReviewsData))$r.squared)
+cat(" ")
+
+# Corr Plot - "Funny" and "Useful"
+ggplot(resReviewsData) +
+  aes(x = funny, y = useful) +
+  geom_point(colour = "#0c4c8a") +
+  theme_minimal() + geom_smooth(method=lm, se=FALSE) 
+
+cat("Funny | Useful: ", summary(lm(funny ~ useful, data=resReviewsData))$r.squared)
+cat(" ")
+
+```
+The 2 words that have the most association are "Useful" and "Cool", which have an r-squared value of 0.7180761, and the ones that have the least association are "Funny" and "Useful", with an r-square value of 0.5725723. 
+
+Since the methods that we tried to determine whether a 3-star rating is positive or negative are not very conclusive, we can only safely conclude that 1-star and 2-star ratings should be considered negative, and 4-star and 5-star ratings should be considered positive for now.
+
+### Data Cleaning 
+
+As words can have different meanings or even different spellings in different countries, we decide to stick to using only reviews from the USA for our analysis.
+
+```{r Initial Data Cleaning}
+
+#Checking where the reviews are from using postal_code
+resReviewsData %>% group_by(postal_code) %>% tally() %>% arrange(desc(n))
+
+#Keep only the those reviews from 5-digit postal-codes  
+rrData <- resReviewsData %>% filter(str_detect(postal_code, "^[0-9]{1,5}"))
+
+#Check the state abbreviations
+rrData %>% group_by(state) %>% tally() %>% arrange(desc(n))
+
+```
+
+We notice that there is a state "BW", which is not a state that is in the USA, and upon further research we find that this is a state located in Germany, and since the reviews are in German, it will not be useful to our analysis, so we remove the reviews that are from the state "BW".
+```{r Data Cleaning}
+
+#filter out state "BW", which is located in Germany and not the USA
+rrData <- rrData %>% filter(state!="BW")
+rrData
+
+```
+
+Once our data set has been cleaned, we tokenize the reviews, which converts them from a long string of text into individual words which we will use later for our sentiment analysis.
+```{r}
+#tokenize the text of the reviews in the column named 'text‘ -keep only the reviewID, stars attribs
+rrTokens<-rrData%>% select(review_id, stars, text ) %>% unnest_tokens(word, text)
+#head(rrTokens)
+
+#How many distinct terms?
+rrTokens%>% distinct(word)%>% dim()
+
+```
+
+To help reduce the number of unique tokens/terms we will have in our dataset, we remove stop words from the dataset, which include words such as "a", "after", "about, etc that will not provide any useful insights in our analysis on the reviews.
+```{r Remove Stop Words}
+#remove stopwords
+rrTokens<-rrTokens%>% anti_join(stop_words)
+
+#How many distinct terms?
+rrTokens%>% distinct(word)%>% dim()
+
+#count the total occurrences of different words, & sort by most frequent
+rrTokens%>% count(word, sort=TRUE) %>% top_n(10)
+
+
+```
+Removing the stop words decreases the number of distinct terms from 56705 to 56006.
+
+Next, we remove any "rare" words, which may not be relevant to the review's content, such as "15pm",  "absorb", "acid" etc.
+```{r Remove Rare Words}
+
+#Removing the words which are not present in at least 10 reviews, as these likely will not be useful for our analysis since they are not common words in the reviews
+rareWords<-rrTokens%>% count(word, sort=TRUE) %>% filter(n<10)
+rareWords
+
+xx<-anti_join(rrTokens, rareWords)
+
+#How many distinct terms?
+xx%>% distinct(word)%>% dim()
+
+
+```
+Removing the rare words decreases the number of distinct terms from 56006 to 8040, which is quite a significant reduction.
+
+We also make sure to remove the terms containing digits as these also will not be useful for our analysis since we cannot analyze sentiment based on terms that are numbers.
+```{r Remove Digits}
+
+#check if there are any remaining words to remove
+xx %>% count(word, sort=TRUE)
+
+#Remove the terms containing digits
+xx <-xx %>% filter(str_detect(word,"[0-9]") == FALSE)
+
+rrTokens<-xx
+
+#How many distinct terms?
+rrTokens%>% distinct(word) %>% dim()
+
+```
+Removing the terms that are digits/numerical decreases the number of distinct terms from 8040 to 7835. Overall we reduced the number of distinct terms from 56705 to 7835, which is quite a significant reduction.
+
+## (b) What are some words indicative of positive and negative sentiment? 
+
+```{r}
+#words associated with different star ratings
+
+#Check words by star rating of reviews
+rrTokens%>% group_by(stars) %>% count(word, sort=TRUE)
+
+#proportion of word occurrence by star ratings
+ws<-rrTokens%>% group_by(stars) %>% count(word, sort=TRUE)
+ws<-ws%>% group_by(stars) %>% mutate(prop=n/sum(n))
+
+#check the proportion of 'love' among reviews with 1,2,..5 stars
+ws%>% filter(word=='love')
+
+#what are the most commonly used words by star rating
+ws%>% group_by(stars) %>% arrange(stars, desc(prop)) 
+#to see the top 20 words by star ratings
+ws%>% group_by(stars) %>% arrange(stars, desc(prop))%>% filter(row_number()<=20) 
+
+#To plot this
+ws%>% group_by(stars) %>% arrange(stars, desc(prop))%>% filter(row_number()<=20) %>% ggplot(aes(word, prop))+geom_col()+coord_flip()+facet_wrap((~stars))
+
+```
+
+We plot the top 15 words to understand how the words are associated with the higher and lower star ratings. This plot is obtained after removing certain common words such as : 'food', 'time', 'restaurant', 'service', 'people', 'eat', 'bag', 'chicken','lunch','pizza','menu', 'sauce' ,'table' , 'bit', 'cheese', 'burger', 'fries', 'night', 'meal', 'manager'.
+```{r Top 15 Words}
+
+# plot without words like ‘food’, ‘time’,… which occurs across ratings
+ws%>% filter(! word %in% c('food', 'time', 'restaurant', 'service', 'people', 'eat', 'bag', 'chicken','lunch','pizza','menu', 'sauce' ,'table' , 'bit', 'cheese', 'burger', 'fries', 'night', 'meal', 'manager'))%>% group_by(stars) %>% arrange(stars, desc(prop)) %>% filter(row_number() <=15)%>% ggplot(aes(word, prop))+geom_col()+coord_flip()+facet_wrap((~stars))
+
+```
+The lower ratings generally have words such as ‘worst’, ‘wait’, ‘horrible’, ‘cold’, ‘rude’ etc. whereas the higher ratings have words ‘pretty, ‘nice’, ‘hot’ , ‘delicious’, ‘love’ associated with them. This is not surprising as words such as  ‘worst’, ‘wait’, ‘horrible’, ‘cold’, and ‘rude’ are generally associated with a negative meaning or sentiment, and ‘pretty, ‘nice’, ‘hot’ , ‘delicious’, and ‘love’ are generally associated with a positive meaning or sentiment.
+
+## (b) What are some words indicative of positive and negative sentiment? (One approach is to determine the average star rating for a word based on star ratings of documents where the word occurs). 
+
+To find the most positive and negative words, we also calculate the average star rating of each word based on all the documents where the words occur, and find the top 20 positive words (highest rating) and 20 negative words (lowest rating), and filtered out the words that we found in the previous plots to not be helpful in our sentiment analysis.
+```{r Average Star Ratings}
+
+#What are some words indicative of positive and negative sentiment?
+xx<-ws%>% group_by(word) %>% summarise( totWS= sum(stars*prop))
+
+#What are the 20 words with highest star rating (the positive words)
+xx %>% top_n(20) %>% arrange(desc(totWS))
+xx %>% top_n(20) %>% filter(! word %in% c('food', 'time', 'restaurant', 'service', 'people', 'eat', 'bag', 'chicken','lunch','pizza','menu', 'sauce' ,'table' , 'bit', 'cheese', 'burger', 'fries', 'night', 'meal', 'manager'))%>% ggplot(aes(word, totWS))+geom_col()+coord_flip()+ggtitle("Positive words")
+
+#What are the 20 words with lowest star rating (the negative words)
+xx %>% top_n(-20) %>% arrange(totWS)
+xx %>% top_n(-20)  %>% filter(! word %in% c('food', 'time', 'restaurant', 'service', 'people', 'eat', 'bag', 'chicken','lunch','pizza','menu', 'sauce' ,'table' , 'bit', 'cheese', 'burger', 'fries', 'night', 'meal', 'manager'))%>% ggplot(aes(word, totWS))+geom_col()+coord_flip()+ggtitle("Negative words")
+
+```
+Based on the analysis we find that some of the top most common positive words are 'nice', ‘delicious’, ‘friendly’, ‘pretty’, ‘amazing’, and some of the top most negative words are ‘disgust’, ‘disrespectful’, ‘unwilling, 'patronizing', etc. There are also still some common words such as 'staff', 'salad', ‘coffe’, ‘fax’, ‘vehicle’, etc which do not indicate positive or negative sentiments and hence cannot be used for sentiment analysis, so we filter those words out. 
+
+```{r}
+
+filteredWords <- c('food', 'time', 'restaurant', 'service', 'people', 'eat', 'bag', 'chicken','lunch','pizza','menu', 'sauce' ,'table' , 'bit', 'cheese', 'burger', 'fries', 'night', 'meal', 'manager', 'salad', 'staff', 'coffe', 'fax', 'flyer', 'dominoes', 'neven', "rubio's", 'santi', 'triangles', 'understands', 'topper', 'tipping', 'vehicle')
+
+#What are the 20 words with highest star rating (the positive words)
+xx %>% top_n(20) %>% arrange(desc(totWS))
+xx %>% top_n(20) %>% filter(! word %in% filteredWords)%>% ggplot(aes(word, totWS))+geom_col()+coord_flip()+ggtitle("Positive words")
+
+#What are the 20 words with lowest star rating (the negative words)
+xx %>% top_n(-20) %>% arrange(totWS)
+xx %>% top_n(-20)  %>% filter(! word %in% filteredWords)%>% ggplot(aes(word, totWS))+geom_col()+coord_flip()+ggtitle("Negative words")
+
+```
+As shown in the above plots:
+Top Positive Words - pretty, nice, love, friendly, fresh, delicious, amazing
+Top Negative Words - useless, unwilling, unedible, shoved, patronizing, disrespectful, disgust, bullshit
+
+As a result of our exploratory data analysis, we've found common words from the token list such as 'food', 'time', 'restaurant', 'service','people', etc that should be eliminated from our list to enhance the performance of our sentiment analysis, as these words do not help us identifying positive and negative sentiments among the reviews. The remaining list of words makes sense in determining positive or negative sentiment. 
+
+```{r Remove Common Words}
+
+#filter out common words that we have found to not be useful in our sentiment analysis
+rrTokens <- rrTokens %>% filter(! word %in% filteredWords)
+
+```
+
+## (c) We will consider three dictionaries, available through the tidytext package – the NRC dictionary of terms denoting different sentiments, the extended sentiment lexicon developed by Prof Bing Liu, and the AFINN dictionary which includes words commonly used in user-generated content in the web. The first provides lists of words denoting different sentiment (for eg., positive, negative, joy, fear, anticipation, …), the second specifies lists of positive and negative words, while the third gives a list of words with each word being associated with a positivity score from -5 to +5.
+
+### (d)(i) Should you use stemming or lemmatization when using the dictionaries? 
+
+When choosing between stemming and lemmatization, we decide to choose lemmatization instead, as lemmatization considers the context and converts the word to its meaningful base form, while stemming just removes or stems the last few characters of a word, often leading to incorrect meanings and spelling, which will make it difficult to analyze the terms using the dictionaries.
+```{r Stemming, Lemmatizing}
+
+#stemming
+rrTokens_stem<-rrTokens%>% mutate(word_stem= SnowballC::wordStem(word))
+
+#lemmatization
+rrTokens_lemm<-rrTokens%>% mutate(word_lemma= textstem::lemmatize_words(word))
+
+#tokenize, remove stopwords, and lemmatize 
+rrTokens<-rrTokens%>% mutate(word = textstem::lemmatize_words(word))
+
+```
+
+We filter out words with less than 3 characters and more than 15 characters to decrease the number of tokens
+```{r Term Frequency}
+
+# filter out words with less than 3 characters more than 15 characters
+rrTokens<-rrTokens%>% filter(str_length(word)<=3 | str_length(word)<=15)
+
+rrTokens<-rrTokens%>% group_by(review_id, stars) %>% count(word)
+
+#count total number of words by review, and add this in a column
+totWords<-rrTokens%>% group_by(review_id) %>% count(word, sort=TRUE) %>% summarise(total=sum(n))
+
+#add the column of counts
+xx<-left_join(rrTokens, totWords)
+
+# now n/total gives the tfvalues
+xx<-xx %>% mutate(tf=n/total)
+head(xx)
+
+#We can use the bind_tf_idf function to calculate the tf, idf and tf_idf values
+rrTokens<-rrTokens%>% bind_tf_idf(word, review_id, n)
+rrTokens %>% arrange(desc(tf_idf))
+
+```
+### (d) (i) Do you use term frequency, tfidf, or other measures, and why?
+
+We computed the tf-idf scores in order to run our sentiment analysis as td-idf reflects the importance of the word in a document. tf, or Term Frequency, is the frequency of the individual words/terms within a document, while idf, or Inverse Document Frequency, is the inverse document frequency of the word across a set of documents, where the weight is decreased for more common words and increased for less common words.These two statistics are then multiplied to give us the tf-idf score, which will help us identify any terms that may be undervalued.
+
+### How many matching terms are there for each of the dictionaries?
+```{r Sentiment Dictionaries}
+
+#take a look at the words in the sentiment dictionaries –compare. 
+sBing<-get_sentiments("bing") %>% view()
+sNRC<-get_sentiments("nrc") %>% view()
+sAFINN<-get_sentiments("afinn") %>% view()
+
+#Number of matching terms in the Bing dictionary
+rrSenti_bing_inner <- rrTokens %>% inner_join(get_sentiments("bing"), by="word") %>% group_by(word, sentiment) %>% summarise(totOcc=sum(n)) %>%
+arrange(sentiment, desc(totOcc))
+dim(rrSenti_bing_inner)
+#rrSenti_bing_inner
+
+#Number of matching terms in the nrc dictionary
+rrSenti_nrc_inner <- rrTokens %>% inner_join(get_sentiments("nrc"), by="word") %>% group_by(word, sentiment) %>% summarise(totOcc=sum(n)) %>%
+arrange(sentiment, desc(totOcc))
+dim(rrSenti_nrc_inner)
+#rrSenti_nrc_inner
+
+#Number of matching terms in the afinn dictionary
+rrSenti_afinn_inner<-rrTokens%>% inner_join(get_sentiments("afinn"), by="word") %>% group_by(word, value) %>% summarise(totOcc=sum(n)) %>% arrange(value, desc(totOcc))
+dim(rrSenti_afinn_inner)
+#rrSenti_afinn_inner
+```
+To find out the number of matching terms there are between the three dictonaries and our list of terms, we use an inner_join on word, which will join the two tables together on the condition that any term found in both the rrToken table and each dictonary table will be matched. For the Bing dictionary has 951 matching terms, the nrc dictonary has 2868 matching terms and the afinn dictonary has 524 matching terms.
+
+### Consider using the dictionary based positive and negative terms to predict sentiment (positive or negative based on star rating) of a movie. One approach for this is: using each dictionary, obtain an aggregated positiveScore and a negativeScore for each review; for the AFINN dictionary, an aggregate positivity score can be obtained for each review. Describe how you obtain predictions based on aggregated scores. 
+
+``` {r Sentiment - Bing Dictonary}
+
+#negate the counts for the negative sentiment words
+xx <- rrSenti_bing_inner %>% mutate (totOcc=ifelse(sentiment=="positive", totOcc, -totOcc))
+dim(xx)
+
+# the most positive and most negative words in reviews
+# Earlier it was grouped by word and sentiment
+xx <- ungroup(xx)
+xx %>% top_n(15)
+xx %>% top_n(-15)
+
+#plot
+rbind(top_n(xx, 15), top_n(xx, -15)) %>% mutate(word=reorder(word,totOcc)) %>% 
+  ggplot(aes(word, totOcc, fill=sentiment)) +geom_col()+coord_flip()
+
+```
+The plot above illustrates the top 15 most positive and negative terms used in the reviews. Some of the most popular positive words included "love", "nice", "deliciously","friendly" and "pretty", while some of the most popular negative words were "bad", "disappoint", "cheap" and "cold"," which were similar to the terms we identified earlier during the data exploration.
+
+To compute the sentiment score, we first summarize the positive and negative words, then compute the average probability of each word being positive and negative. We then compute the average sentiment score by taking the absolute difference between the positive and negative score of review.
+```{r Sentiment Scores - Bing Dictonary}
+
+#Bing Review Sentiment
+rrSenti_bing<-rrTokens%>% inner_join(get_sentiments("bing"), by="word")
+
+#summarise positive/negative sentiment words per review
+revSenti_bing<-rrSenti_bing%>% group_by(review_id, stars) %>% summarise(nwords=n(),posSum=sum(sentiment=='positive'), negSum=sum(sentiment=='negative'))
+
+#calculate sentiment score based on proportion of positive, negative words
+revSenti_bing<-revSenti_bing%>% mutate(posProp=posSum/nwords, negProp=negSum/nwords)
+revSenti_bing<-revSenti_bing%>% mutate(sentiScore=posProp-negProp)
+
+#Do review star ratings correspond to the positive/negative sentiment words
+revSenti_bing%>% group_by(stars) %>%summarise(avgPos=mean(posProp), avgNeg=mean(negProp), avgSentiSc=mean(sentiScore))
+
+```
+As shown in the table above, 1-star and 2-star ratings have an average sentiment score that is less than zero, which corresponds to a negative sentiment, and 3-star, 4-star and 5-star ratings have an average score that is above zero, which indicates a positive sentiment.
+
+```{r Sentiment - NRC Dictionary}
+
+#top few words for different sentiments
+rrSenti_nrc_inner%>% group_by(sentiment) %>% arrange(sentiment, desc(totOcc)) %>% top_n(10)
+
+#How many words for the different sentiment categories
+rrSenti_nrc_inner %>% group_by(sentiment) %>% summarise(count=n(), sumn=sum(totOcc))
+
+```
+Rather than just identifying words as either positive and negative, the NRC dictionary assigns a more specific sentiment to each word. From the table above, we can see that there are a few terms appear multiple times in different sentiments, for example, "bad" appears in anger, disgust, fear and sadness, and "friendly" appears in anticipation, joy, positive and trust, so we decide to re-categorize the sentiments in the NRC Dictonary so that anger, disgust, fear, sadness, and negative sentiments will denote "bad" or "negative" reviews, while positive, joy, anticipation, and trust sentiments will denote "good" or "positive" reviews. By doing this, we can group together all of the positive and negative terms to determine which negative and positive words are the most common, and once they are grouped together we can compare the most positive and negative reviews in the same way as we did with the Bing dictionary.
+
+```{r Sentiment - NRC Dictionary continued}
+
+#{anger, disgust, fear, sadness, negative} sentiments denote 'bad' reviews, and {positive, joy, anticipation, trust} sentiments denote 'good' reviews
+xx<-rrSenti_nrc_inner%>% mutate(goodBad=ifelse(sentiment %in% c('anger', 'disgust', 'fear', 'sadness', 'negative'), -totOcc, ifelse(sentiment %in% c('positive', 'joy', 'anticipation', 'trust'), totOcc, 0)))
+xx
+
+xx<-ungroup(xx)
+top_n(xx, 10)
+top_n(xx, -10)
+
+rbind(top_n(xx, 25), top_n(xx, -25)) %>% mutate(word=reorder(word,goodBad)) %>% ggplot(aes(word, goodBad, fill=goodBad)) +geom_col()+coord_flip()
+
+```
+
+The words with the highest score (indicating a positive sentiment) include "love", "delicious", "friendly", and "pretty", and the words with the lowest scores (indicating a negative sentiment) include "bad", "leave", "hot" and "serve", which again, are quite similar to the positive and negative terms we identified earlier during the data exploration. One thing we noticed is that certain words such as "wait" and "serve" appear to have both positive and negative sentiment, which makes sense as these two words can be used in both a negative and positive context. For example, once could write a negative review saying, "I had to wait forever to be served my meal", or a positive review saying "The service was excellent, I cannot wait to be back!".
+
+```{r Sentiment Scores - NRC Dictonary}
+
+#NRC Review Sentiment
+rrSenti_nrc<-rrTokens%>% inner_join(get_sentiments("nrc"), by="word")
+
+#categorize sentiments to either "positive", "negative" or "neutral" 
+rrSenti_nrc <- rrSenti_nrc%>% mutate(goodBad=ifelse(sentiment %in% c('anger', 'disgust', 'fear', 'sadness', 'negative'), "negative", ifelse(sentiment %in% c('positive', 'joy', 'anticipation', 'trust'), "positive", "neutral")))
+  
+#summarise positive/negative sentiment words per review
+revSenti_nrc<-rrSenti_nrc%>% group_by(review_id, stars) %>% summarise(nwords=n(),posSum=sum(goodBad == "positive"), negSum=sum(goodBad == "negative"))
+revSenti_nrc
+
+#calculate sentiment score based on proportion of positive, negative words
+revSenti_nrc<-revSenti_nrc%>% mutate(posProp=posSum/nwords, negProp=negSum/nwords)
+revSenti_nrc<-revSenti_nrc%>% mutate(sentiScore=posProp-negProp)
+
+#Do review star ratings correspond to the positive/negative sentiment words
+revSenti_nrc%>% group_by(stars) %>%summarise(avgPos=mean(posProp), avgNeg=mean(negProp), avgSentiSc=mean(sentiScore))
+
+```
+
+Our third dictionary, AFINN Dictionary, assigns a score between -5 to 5 to each word instead of classifying them as either positive or negative, with lower values indicating a more negative sentiment, and higher values indicating a more positive sentiment. For example, a word with a score of 5 is considered more positive than a word with a score of 3 and conversely, a word with a score of -5 is considered more negative than a word wit a score of -3.
+
+```{r Sentiment - AFINN Dictionary}
+
+#AFINN Dictionary
+rrSenti_afinn<-rrTokens%>% inner_join(get_sentiments("afinn"), by="word")
+rrSenti_afinn
+
+xx<-rrSenti_afinn%>% group_by(word) %>% summarise(sentiSum=sum(value))
+
+
+#plot AFINN Words by sum of sentiment score
+rbind(top_n(xx, 15), top_n(xx, -15)) %>% mutate(word=reorder(word,sentiSum)) %>% 
+  ggplot(aes(word, sentiSum, fill=sentiSum)) +geom_col()+coord_flip()
+
+```
+
+As expected, the words with the highest sentiment score (indicating a positive sentiment) include "love", "nice", "awesome", and "friendly", and the words with the lowest scores (indicating a negative sentiment) include "bad", "disappoint", "leave" and "horrible", which again, make sense and are quite similar to the positive and negative terms we identified earlier during the data exploration.
+
+To find the average sentiment score, all we need to do is calculate the average of the sum of the scores in each star rating since they are already in numerical values.
+
+```{r Sentiment Score - AFINN Dictionary}
+
+revSenti_afinn<-rrSenti_afinn%>% group_by(review_id, stars) %>% summarise(nwords=n(), sentiSum=sum(value))
+
+revSenti_afinn%>% group_by(stars) %>% summarise(avgLen=mean(nwords), avgSenti=mean(sentiSum))
+
+```
+
+The table above shows that the average sentiment for 1-star ratings is below zero, and the 2, 3, 4, and 5-star ratings all have a positive average sentiment on average, which is surprising since we would expect 2-star ratings to have an average sentiment that is negative.
+
+### Are you able to predict review sentiment based on these aggregated scores, and how do they perform? Does any dictionary perform better? 
+
+```{r High/Low Stat classification - 1,2,4,5 Stars}
+#considering reviews with 1 to 2 stars as negative, and 4 to 5 stars as positive
+
+#####Bing#####
+revSenti_bing <- rrSenti_bing %>% mutate(hiLo=ifelse(stars<=2,-1, ifelse(stars>=4, 1, 0 )))
+revSenti_bing <- revSenti_bing %>% mutate(pred_hiLo=ifelse(sentiment=="positive", 1, -1)) 
+#head(revSenti_bing)
+revSenti_bing <- revSenti_bing %>% drop_na(pred_hiLo)
+xx<-revSenti_bing %>% filter(hiLo!=0)
+table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+cmx <- table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+#Calculate accuracy, specificity and precision based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+specificity <- (cmx[1])/(cmx[1]+cmx[2])
+specificity
+precision <- (cmx[4])/(cmx[4]+cmx[3])
+precision
+
+#####NRC#####
+revSenti_nrc <- rrTokens %>% left_join(get_sentiments("nrc"), by="word")
+# Positive: "anticipation","joy","positive","trust", "surprise"         
+# Negative: "anger", "disgust", "fear", "negative", "sadness"
+# else NA: 0
+revSenti_nrc <- revSenti_nrc %>% mutate(hiLo=ifelse(stars<=2,-1, ifelse(stars>=4, 1, 0 )))
+revSenti_nrc <- revSenti_nrc %>% drop_na(sentiment)
+revSenti_nrc <- revSenti_nrc %>% mutate(pred_hiLo=ifelse(sentiment %in% c('anger', 'disgust', 'fear', 'sadness', 'negative'), -1, ifelse(sentiment %in% c('positive', 'joy', 'anticipation', 'trust'), 1, 0)))
+xx<-revSenti_nrc %>% filter(hiLo!=0)
+xx<-xx %>% filter(pred_hiLo!=0)
+table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+cmx <- table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+#Calculate accuracy, specificity and precision based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+specificity <- (cmx[1])/(cmx[1]+cmx[2])
+specificity
+precision <- (cmx[4])/(cmx[4]+cmx[3])
+precision
+
+#####AFINN#####
+revSenti_afinn<-revSenti_afinn %>% mutate(hiLo=ifelse(stars<=2,-1, ifelse(stars>=4, 1, 0 )))
+revSenti_afinn<-revSenti_afinn %>% mutate(pred_hiLo=ifelse(sentiSum> 0, 1, -1))
+#filter out the reviews with 3 stars, and get the confusion matrix for hiLovs pred_hiLo
+xx<-revSenti_afinn %>% filter(hiLo!=0)
+table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+cmx <- table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+#Calculate accuracy, specificity and precision based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+specificity <- (cmx[1])/(cmx[1]+cmx[2])
+specificity
+precision <- (cmx[4])/(cmx[4]+cmx[3])
+precision
+
+```
+
+Based on our predictions using these aggregated scores for 1, 2, 4, and 5-star ratings, it seems that the AFINN dictionary's model seems to do significantly better than the other two dictionaries' models, with a 83.52% accuracy, 67.32% specificity, and 88.33% precision.
+
+```{r High/Low Stat classification - 1,5 Stars}
+
+#considering reviews with 1 stars as negative, and this with 5 stars as positive
+
+#####Bing#####
+revSenti_bing <- rrSenti_bing %>% mutate(hiLo=ifelse(stars<=1,-1, ifelse(stars>=5, 1, 0 )))
+revSenti_bing <- revSenti_bing %>% mutate(pred_hiLo=ifelse(sentiment=="positive", 1, -1)) 
+#head(revSenti_bing)
+revSenti_bing <- revSenti_bing %>% drop_na(pred_hiLo)
+xx<-revSenti_bing %>% filter(hiLo!=0)
+table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+cmx <- table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+#Calculate accuracy, specificity and precision based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+specificity <- (cmx[1])/(cmx[1]+cmx[2])
+specificity
+precision <- (cmx[4])/(cmx[4]+cmx[3])
+precision
+
+#####NRC#####
+revSenti_nrc <- rrTokens %>% left_join(get_sentiments("nrc"), by="word")
+# Positive: "anticipation","joy","positive","trust", "surprise"         
+# Negative: "anger", "disgust", "fear", "negative", "sadness"
+# else NA: 0
+revSenti_nrc <- revSenti_nrc %>% mutate(hiLo=ifelse(stars<=1,-1, ifelse(stars>=5, 1, 0 )))
+revSenti_nrc <- revSenti_nrc %>% drop_na(sentiment)
+revSenti_nrc <- revSenti_nrc %>% mutate(pred_hiLo=ifelse(sentiment %in% c('anger', 'disgust', 'fear', 'sadness', 'negative'), -1, ifelse(sentiment %in% c('positive', 'joy', 'anticipation', 'trust'), 1, 0)))
+xx<-revSenti_nrc %>% filter(hiLo!=0)
+xx<-xx %>% filter(pred_hiLo!=0)
+table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+cmx <- table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+#Calculate accuracy, specificity and precision based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+specificity <- (cmx[1])/(cmx[1]+cmx[2])
+specificity
+precision <- (cmx[4])/(cmx[4]+cmx[3])
+precision
+
+#####AFINN#####
+revSenti_afinn<-revSenti_afinn %>% mutate(hiLo=ifelse(stars<=1,-1, ifelse(stars>=5, 1, 0 )))
+revSenti_afinn<-revSenti_afinn %>% mutate(pred_hiLo=ifelse(sentiSum> 0, 1, -1))
+#filter out the reviews with 3 stars, and get the confusion matrix for hiLovs pred_hiLo
+xx<-revSenti_afinn %>% filter(hiLo!=0)
+table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+cmx <- table(actual=xx$hiLo, predicted=xx$pred_hiLo)
+#Calculate accuracy, specificity and precision based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+specificity <- (cmx[1])/(cmx[1]+cmx[2])
+specificity
+precision <- (cmx[4])/(cmx[4]+cmx[3])
+precision
+
+```
+
+We also decided to try using only the aggregated scores for 1-star and 5-star ratings and the accuracy, specificity and precision of all three dictionaries' models improved quite significantly, with the AFINN dictionary's model accuracy increasing from 83.52% to 87.95%, specificity increasing from 67.32% to 74.03% and precision increasing from 88.33 to 92.29%.
+
+## (d) Develop models to predict review sentiment. For this, split the data randomly into training and test sets. To make run times manageable, you may take a smaller sample of reviews (minimum should be 10,000). 
+
+## Bing Dictonary Model - Cleaning and Splitting Data
+```{r Cleaning Tst and Trn Data - Bing, message =FALSE, cache=TRUE}
+
+#use pivot_wider to convert to a dtm form where each row is for a review and columns correspond to words
+revDTM_sentiBing <- rrSenti_bing %>%  pivot_wider(id_cols = review_id, names_from = word, values_from = tf_idf)
+
+#considering only those words which match a sentiment dictionary (for eg. bing)
+revDTM_sentiBing <- rrSenti_bing %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiBing <- revDTM_sentiBing %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#how many review with 1, -1  'class'
+revDTM_sentiBing %>% group_by(hiLo) %>% tally()
+
+#Cleaning data
+
+#replace all the NAs with 0
+revDTM_sentiBing<-revDTM_sentiBing %>% replace(., is.na(.), 0)
+
+```
+
+```{r Trn and Tst Split - Bing}
+#Splitting data into train and test
+
+revDTM_sentiBing$hiLo<- as.factor(revDTM_sentiBing$hiLo)
+set.seed(100)
+revDTM_sentiBing_reduced <- sample_n(revDTM_sentiBing, 10000)
+revDTM_sentiBing_reduced %>% group_by(hiLo) %>% tally()
+
+revDTM_sentiBing_split<- initial_split(revDTM_sentiBing_reduced, 0.7)
+revDTM_sentiBing_trn<- training(revDTM_sentiBing_split)
+revDTM_sentiBing_tst<- testing(revDTM_sentiBing_split)
+
+```
+
+## NRC  Dictonary Model - Cleaning and Splitting Data
+```{r Cleaning Tst and Trn Data - NRC, message =FALSE, cache=TRUE}
+
+#We remove these columns so we can later remove duplicate rows using distinct()
+rrSenti_nrc_noSenti = select(rrSenti_nrc, -c("sentiment", "goodBad"))
+
+#use pivot_wider to convert to a dtm form where each row is for a review and columns correspond to words
+revDTM_sentiNRC <- rrSenti_nrc_noSenti %>% distinct() 
+
+revDTM_sentiNRC <- revDTM_sentiNRC %>% pivot_wider(id_cols = review_id, names_from = word, values_from = tf_idf)
+
+
+#considering only those words which match a sentiment dictionary (for eg. bing)
+revDTM_sentiNRC <- rrSenti_nrc_noSenti %>% distinct() 
+revDTM_sentiNRC <- revDTM_sentiNRC %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiNRC <- revDTM_sentiNRC %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#how many review with 1, -1  'class'
+revDTM_sentiNRC %>% group_by(hiLo) %>% tally()
+
+#Cleaning data
+
+#replace all the NAs with 0
+revDTM_sentiNRC<-revDTM_sentiNRC %>% replace(., is.na(.), 0)
+revDTM_sentiNRC
+```
+
+```{r Trn and Tst Split - NRC}
+#Splitting data into train and test
+
+revDTM_sentiNRC$hiLo<- as.factor(revDTM_sentiNRC$hiLo)
+set.seed(100)
+revDTM_sentiNRC_reduced <- sample_n(revDTM_sentiNRC, 10000)
+revDTM_sentiNRC_reduced %>% group_by(hiLo) %>% tally()
+
+revDTM_sentiNRC_split<- initial_split(revDTM_sentiNRC_reduced, 0.7)
+revDTM_sentiNRC_trn<- training(revDTM_sentiNRC_split)
+revDTM_sentiNRC_tst<- testing(revDTM_sentiNRC_split)
+
+```
+
+## AFINN  Dictonary Model - Cleaning and Splitting Data
+```{r Cleaning Tst and Trn Data - AFINN, message =FALSE, cache=TRUE}
+
+#use pivot_wider to convert to a dtm form where each row is for a review and columns correspond to words
+revDTM_sentiAFINN <- rrSenti_afinn %>% pivot_wider(id_cols = review_id, names_from = word, values_from = tf_idf)
+
+#considering only those words which match a sentiment dictionary (for eg. AFINN)
+revDTM_sentiAFINN <- rrSenti_afinn %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiAFINN <- revDTM_sentiAFINN %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#how many review with 1, -1  'class'
+revDTM_sentiAFINN %>% group_by(hiLo) %>% tally()
+
+#Cleaning data
+
+#replace all the NAs with 0
+revDTM_sentiAFINN<-revDTM_sentiAFINN %>% replace(., is.na(.), 0)
+revDTM_sentiAFINN
+```
+
+```{r Trn and Tst Split - AFINN}
+#Splitting data into train and test
+
+revDTM_sentiAFINN$hiLo<- as.factor(revDTM_sentiAFINN$hiLo)
+set.seed(100)
+revDTM_sentiAFINN_reduced <- sample_n(revDTM_sentiAFINN, 10000)
+revDTM_sentiAFINN_reduced %>% group_by(hiLo) %>% tally()
+
+revDTM_sentiAFINN_split<- initial_split(revDTM_sentiAFINN_reduced, 0.7)
+revDTM_sentiAFINN_trn<- training(revDTM_sentiAFINN_split)
+revDTM_sentiAFINN_tst<- testing(revDTM_sentiAFINN_split)
+
+```
+
+For faster computations, we randomly select 10,000 rows, and split the dataset into 70% training and 30% testing to ensure we have enough data to train the model.
+
+## One may seek a model built using only the terms matching any or all of the sentiment dictionaries, or by using a broader list of terms (the idea here being, maybe words other than only the dictionary terms can be useful). You should develop at least three different types of models (Naïve Bayes, and at least two others of your choice ….Lasso logistic regression (why Lasso?), xgb, svm, random forest (ranger). 
+
+### (i) Develop models using only the sentiment dictionary terms – try the three different dictionaries; how do the dictionaries compare in terms of predictive performance ? Do you use term frequency, tfidf, or other measures, and why? What is the size of the document term matrix?
+
+To measure performance, we use both AUC and Accuracy to compare the models. We feel that AUC is a good measure as it tells how much the model is capable of distinguishing between the classes, which in this case are "negative" and "positive" sentiments. The higher the AUC, the better the model is at predicting "negative"s as "negative"s and "positive"s as "positive"s. And since our aim is to predict both "negative" and "positive" sentiments, we feel that Accuracy, which is (TP + TN)/(TP + TN + FP + FN), will give us a good sense of how well our Models are able to predict both "negative" and "positive" sentiments.
+
+# Bing Dictionary
+
+### Developing a Random Forest Model For Bing Dictionary
+
+We decide to use a random forest model with 200 trees for faster computations as anything lower than that will likely give us a less accurate model.
+
+``` {r Random Forest Model - Bing}
+
+#develop a random forest model to predict hiLo from the words in the reviews
+
+rfModel1<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiBing_trn %>% select(-review_id), num.trees = 200, importance='permutation', probability = TRUE)
+
+#which variables are important
+importance(rfModel1) %>% view()
+
+# Obtain predictions, and calculate performance
+revSentiBing_predTrn<- predict(rfModel1, revDTM_sentiBing_trn %>% select(-review_id))$predictions
+revSentiBing_predTst<- predict(rfModel1, revDTM_sentiBing_tst %>% select(-review_id))$predictions
+
+# Plot ROC Curves ####################################
+
+rocTrn <- roc(revDTM_sentiBing_trn$hiLo, revSentiBing_predTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiBing_tst$hiLo, revSentiBing_predTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for Bing RF model ####################################
+
+Bing_RFtrn_auc <- auc(as.numeric(revDTM_sentiBing_trn$hiLo), revSentiBing_predTrn[,2])
+Bing_RFtrn_auc
+
+Bing_RFtst_auc <- auc(as.numeric(revDTM_sentiBing_tst$hiLo), revSentiBing_predTst[,2])
+Bing_RFtst_auc
+
+# Confusion Matrix for Bing RF Model ####################################
+
+cmx <- table(actual=revDTM_sentiBing_trn$hiLo, preds=revSentiBing_predTrn[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+Bing_RFtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Bing_RFtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_predTst[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+Bing_RFtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Bing_RFtst_accuracy
+
+```
+For the random forest model using Bing dictionary, the AUC found for our training set and testing set is 0.9905 and 0.9203 respectively. The accuracy based on the confusion matrix for the training set and testing set is .965 and .8884 respectively.
+
+```{r RF Best Threshold - Bing}
+
+# Best threshold from ROC analyses
+bThr<-coords(rocTrn, "best", ret="threshold", transpose = FALSE)
+round(bThr, digits = 2)
+#best threshold is 0.64
+
+# Confusion Matrix for Bing RF Model using best threshold ####################################
+cmx <- table(actual=revDTM_sentiBing_trn$hiLo, preds=revSentiBing_predTrn[,2]>0.64)
+cmx
+#Calculate accuracy based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+
+cmx <- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_predTst[,2]>0.64)
+cmx
+#Calculate accuracy based on confusion matrix
+accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+accuracy
+
+```
+
+As shown above, we found the best threshold and used it to test whether it would help improve our model, however we found that using this threshold actually lowers the model's accuracy slightly. With a threshold of 0.5, we achieved an accuracy of .965 and .8884, so we decided to stick to using a threshold of 0.5 for our future models.
+
+### Developing a Naive-Bayes Model for Bing Dictionary
+
+```{r Naive Bayes Model - Bing, message=FALSE, cache=TRUE}
+
+nbModel1<-naiveBayes(hiLo ~ ., data=revDTM_sentiBing_trn %>% select(-review_id))
+
+revSentiBing_NBpredTrn<-predict(nbModel1, revDTM_sentiBing_trn, type = "raw")
+revSentiBing_NBpredTst<-predict(nbModel1, revDTM_sentiBing_tst, type = "raw")
+
+rocTrn <- roc(revDTM_sentiBing_trn$hiLo, revSentiBing_NBpredTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiBing_tst$hiLo, revSentiBing_NBpredTst[,2], levels=c(-1, 1))
+
+# Plot ROC Curves ####################################
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for Bing NB Model ####################################
+
+Bing_NBtrn_auc <- auc(as.numeric(revDTM_sentiBing_trn$hiLo), revSentiBing_NBpredTrn[,2])
+Bing_NBtrn_auc
+
+Bing_NBtst_auc <- auc(as.numeric(revDTM_sentiBing_tst$hiLo), revSentiBing_NBpredTst[,2])
+Bing_NBtst_auc
+
+# Confusion Matrix of Bing NB Model ####################################
+
+cmx <- table(actual=revDTM_sentiBing_trn$hiLo, preds=revSentiBing_NBpredTrn[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Bing_NBtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Bing_NBtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_NBpredTst[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Bing_NBtst_accuracy  <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Bing_NBtst_accuracy
+
+```
+For the naive-bayes model using Bing dictionary, the AUC found for our training set and testing set is 0.6961 and 0.7335 respectively. The accuracy based on the confusion matrix for the training set and testing set is .4793 and .4973 respectively, which is pretty low, and demonstrates the low performance of the model.
+
+### Developing a GLMnet model using Lasso For Bing Dictionary
+```{r GLMnet Model - Bing}
+
+xDTrn <- revDTM_sentiBing_trn %>% select(-review_id, -hiLo)
+
+set.seed(100)
+glmBing_cv <- cv.glmnet(data.matrix(xDTrn), revDTM_sentiBing_trn$hiLo, family="binomial", type.measure = "auc", nfolds=5, alpha = 1)
+
+# Plot ROC Curves for Bing Lasso Model ####################################
+
+predBingtrn_lasso = predict(glmBing_cv, data.matrix(revDTM_sentiBing_trn %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucBingtrn_lasso <- prediction(predBingtrn_lasso, revDTM_sentiBing_trn$hiLo)
+ROCPerfBingtrn_lasso <- performance(predsaucBingtrn_lasso, "tpr", "fpr")
+
+predBingtst_lasso = predict(glmBing_cv, data.matrix(revDTM_sentiBing_tst %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucBingtst_lasso <- prediction(predBingtst_lasso, revDTM_sentiBing_tst$hiLo)
+ROCPerfBingtst_lasso <- performance(predsaucBingtst_lasso, "tpr", "fpr")
+
+
+plot(ROCPerfBingtrn_lasso, col='blue', legacy.axes = TRUE)
+plot(ROCPerfBingtst_lasso, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+abline(a = 0, b = 1)
+
+# AUC Values for Bing Lasso Model ####################################
+
+aucPerfBingtrn_lasso <- performance(predsaucBingtrn_lasso, "auc")
+aucPerfBingtrn_lasso@y.values
+Bing_Lassotrn_auc <- aucPerfBingtrn_lasso@y.values
+
+aucPerfBingtst_lasso <- performance(predsaucBingtst_lasso, "auc")
+aucPerfBingtst_lasso@y.values
+Bing_Lassotst_auc <- aucPerfBingtst_lasso@y.values
+
+# Confusion Matrix for Bing Lasso Model ####################################
+
+revSentiBing_LassopredTrn <- predict(glmBing_cv,  data.matrix(revDTM_sentiBing_trn %>% select(-review_id, -hiLo)), type = "class")
+revSentiBing_LassopredTst <- predict(glmBing_cv,  data.matrix(revDTM_sentiBing_tst %>% select(-review_id, -hiLo)), type = "class")
+
+cmx <- table(actual=revDTM_sentiBing_trn$hiLo, preds=revSentiBing_LassopredTrn)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Bing_Lassotrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Bing_Lassotrn_accuracy
+
+cmx <- table(actual=revDTM_sentiBing_tst$hiLo, preds=revSentiBing_LassopredTst)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Bing_Lassotst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Bing_Lassotst_accuracy
+
+```
+For the lasso model using Bing dictionary, the AUC found for our training set and testing set is 0.9464 and 0.9347 respectively. The accuracy based on the confusion matrix for the training set and testing set is .8805 and .865 respectively.
+
+Comparing the three models using random forest, naive-bayes, and lasso utilizing the Bing dictionary; the model created using random forest outperformed the rest in terms of accuracy the AUC found and based on the confusion matrix. 
+
+# NRC Dictionary
+
+### Developing a Random Forest Model For NRC Dictionary
+
+We decide to use a random forest model with 200 trees for faster computations as anything lower than that will likely give us a less accurate model.
+``` {r Random Forest Model - NRC}
+
+#develop a random forest model to predict hiLo from the words in the reviews
+
+rfModel2<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiNRC_trn %>% select(-review_id), num.trees = 200, importance='permutation', probability = TRUE)
+
+#which variables are important
+importance(rfModel2) %>% view()
+
+# Obtain predictions, and calculate performance
+revSentiNRC_predTrn<- predict(rfModel2, revDTM_sentiNRC_trn %>% select(-review_id))$predictions
+revSentiNRC_predTst<- predict(rfModel2, revDTM_sentiNRC_tst %>% select(-review_id))$predictions
+
+# Plot ROC Curves ####################################
+
+rocTrn <- roc(revDTM_sentiNRC_trn$hiLo, revSentiNRC_predTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiNRC_tst$hiLo, revSentiNRC_predTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for NRC RF model ####################################
+
+NRC_RFtrn_auc <- auc(as.numeric(revDTM_sentiNRC_trn$hiLo), revSentiNRC_predTrn[,2])
+NRC_RFtrn_auc
+
+NRC_RFtst_auc <- auc(as.numeric(revDTM_sentiNRC_tst$hiLo), revSentiNRC_predTst[,2])
+NRC_RFtst_auc
+
+# Confusion Matrix for NRC RF Model ####################################
+
+cmx <- table(actual=revDTM_sentiNRC_trn$hiLo, preds=revSentiNRC_predTrn[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+NRC_RFtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+NRC_RFtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiNRC_tst$hiLo, preds=revSentiNRC_predTst[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+NRC_RFtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+NRC_RFtst_accuracy
+
+```
+For the random forest model using the NRC dictionary, the AUC found for our training set and testing set is 0.9744286 and 0.8656667 respectively. The accuracy based on the confusion matrix for the training set and testing set is .9744 and .8656 respectively.
+
+### Developing a Naive-Bayes Model for NRC Dictionary
+```{r Naive Bayes Model - NRC, message=FALSE, cache=TRUE}
+
+nbModel2<-naiveBayes(hiLo ~ ., data=revDTM_sentiNRC_trn %>% select(-review_id))
+
+revSentiNRC_NBpredTrn<-predict(nbModel2, revDTM_sentiNRC_trn, type = "raw")
+revSentiNRC_NBpredTst<-predict(nbModel2, revDTM_sentiNRC_tst, type = "raw")
+
+rocTrn <- roc(revDTM_sentiNRC_trn$hiLo, revSentiNRC_NBpredTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiNRC_tst$hiLo, revSentiNRC_NBpredTst[,2], levels=c(-1, 1))
+
+# Plot ROC Curves ####################################
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for NRC NB Model ####################################
+
+NRC_NBtrn_auc <- auc(as.numeric(revDTM_sentiNRC_trn$hiLo), revSentiNRC_NBpredTrn[,2])
+NRC_NBtrn_auc
+
+NRC_NBtst_auc <- auc(as.numeric(revDTM_sentiNRC_tst$hiLo), revSentiNRC_NBpredTst[,2])
+NRC_NBtst_auc
+
+# Confusion Matrix of NRC NB Model ####################################
+
+cmx <- table(actual=revDTM_sentiNRC_trn$hiLo, preds=revSentiNRC_NBpredTrn[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+NRC_NBtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+NRC_NBtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiNRC_tst$hiLo, preds=revSentiNRC_NBpredTst[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+NRC_NBtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+NRC_NBtst_accuracy
+
+```
+For the naive-bayes model using the NRC dictionary, the AUC found for our training set and testing set is 0.618 and 0.6745 respectively. The accuracy based on the confusion matrix for the training set and testing set is .363 and .3725 respectively.
+
+### Developing a GLMnet model using Lasso For NRC Dictionary
+```{r GLMnet Model - NRC}
+
+xDTrn <- revDTM_sentiNRC_trn %>% select(-review_id, -hiLo)
+
+set.seed(100)
+glmNRC_cv <- cv.glmnet(data.matrix(xDTrn), revDTM_sentiNRC_trn$hiLo, family="binomial", type.measure = "auc", nfolds=5, alpha = 1)
+
+# Plot ROC Curves for NRC Lasso Model ####################################
+
+predNRCtrn_lasso = predict(glmNRC_cv, data.matrix(revDTM_sentiNRC_trn %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucNRCtrn_lasso <- prediction(predNRCtrn_lasso, revDTM_sentiNRC_trn$hiLo)
+ROCPerfNRCtrn_lasso <- performance(predsaucNRCtrn_lasso, "tpr", "fpr")
+
+predNRCtst_lasso = predict(glmNRC_cv, data.matrix(revDTM_sentiNRC_tst %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucNRCtst_lasso <- prediction(predNRCtst_lasso, revDTM_sentiNRC_tst$hiLo)
+ROCPerfNRCtst_lasso <- performance(predsaucNRCtst_lasso, "tpr", "fpr")
+
+
+plot(ROCPerfNRCtrn_lasso, col='blue', legacy.axes = TRUE)
+plot(ROCPerfNRCtst_lasso, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+abline(a = 0, b = 1)
+
+# AUC Values for NRC Lasso Model ####################################
+
+aucPerfNRCtrn_lasso <- performance(predsaucNRCtrn_lasso, "auc")
+aucPerfNRCtrn_lasso@y.values
+NRC_Lassotrn_auc <- aucPerfNRCtrn_lasso@y.values
+
+aucPerfNRCtst_lasso <- performance(predsaucNRCtst_lasso, "auc")
+aucPerfNRCtst_lasso@y.values
+NRC_Lassotst_auc <- aucPerfNRCtst_lasso@y.values
+
+# Confusion Matrix for NRC Lasso Model ####################################
+
+revSentiNRC_LassopredTrn <- predict(glmNRC_cv,  data.matrix(revDTM_sentiNRC_trn %>% select(-review_id, -hiLo)), type = "class")
+revSentiNRC_LassopredTst <- predict(glmNRC_cv,  data.matrix(revDTM_sentiNRC_tst %>% select(-review_id, -hiLo)), type = "class")
+
+cmx <- table(actual=revDTM_sentiNRC_trn$hiLo, preds=revSentiNRC_LassopredTrn)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+NRC_Lassotrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+NRC_Lassotrn_accuracy
+
+cmx <- table(actual=revDTM_sentiNRC_tst$hiLo, preds=revSentiNRC_LassopredTst)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+NRC_Lassotst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+NRC_Lassotst_accuracy
+
+```
+For the lasso model using the NRC dictionary, the AUC found for our training set and testing set is 0.9302 and 0.9106 respectively. The accuracy based on the confusion matrix for the training set and testing set is .8615 and .8406 respectively.
+
+Comparing the three models using random forest, naive-bayes, and lasso utilizing the NRC dictionary; the model created using random forest outperformed the rest in terms of accuracy and AUC. The random forest model using Bing outperformed the NRC model using the testing data. 
+
+# AFINN Dictionary
+
+### Developing a Random Forest Model For AFINN Dictionary
+
+We decide to use a random forest model with 200 trees for faster computations as anything lower than that will likely give us a less accurate model.
+``` {r Random Forest Model - AFINN}
+
+#develop a random forest model to predict hiLo from the words in the reviews
+
+rfModel3<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiAFINN_trn %>% select(-review_id), num.trees = 200, importance='permutation', probability = TRUE)
+
+#which variables are important
+importance(rfModel3) %>% view()
+
+# Obtain predictions, and calculate performance
+revSentiAFINN_predTrn<- predict(rfModel3, revDTM_sentiAFINN_trn %>% select(-review_id))$predictions
+revSentiAFINN_predTst<- predict(rfModel3, revDTM_sentiAFINN_tst %>% select(-review_id))$predictions
+
+# Plot ROC Curves ####################################
+
+rocTrn <- roc(revDTM_sentiAFINN_trn$hiLo, revSentiAFINN_predTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiAFINN_tst$hiLo, revSentiAFINN_predTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for AFINN RF model ####################################
+
+AFINN_RFtrn_auc <- auc(as.numeric(revDTM_sentiAFINN_trn$hiLo), revSentiAFINN_predTrn[,2])
+AFINN_RFtrn_auc
+
+AFINN_RFtst_auc <- auc(as.numeric(revDTM_sentiAFINN_tst$hiLo), revSentiAFINN_predTst[,2])
+AFINN_RFtst_auc
+
+# Confusion Matrix for AFINN RF Model ####################################
+
+cmx <- table(actual=revDTM_sentiAFINN_trn$hiLo, preds=revSentiAFINN_predTrn[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+AFINN_RFtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+AFINN_RFtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiAFINN_tst$hiLo, preds=revSentiAFINN_predTst[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+AFINN_RFtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+AFINN_RFtst_accuracy
+
+```
+The AUC found for our training set and testing set is 0.9524286 and 0.8663333 respectively, which is pretty high. 
+
+### Developing a Naive-Bayes Model for AFINN Dictionary
+
+```{r Naive Bayes Model - AFINN, message=FALSE, cache=TRUE}
+
+nbModel3<-naiveBayes(hiLo ~ ., data=revDTM_sentiAFINN_trn %>% select(-review_id))
+
+revSentiAFINN_NBpredTrn<-predict(nbModel3, revDTM_sentiAFINN_trn, type = "raw")
+revSentiAFINN_NBpredTst<-predict(nbModel3, revDTM_sentiAFINN_tst, type = "raw")
+
+rocTrn <- roc(revDTM_sentiAFINN_trn$hiLo, revSentiAFINN_NBpredTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiAFINN_tst$hiLo, revSentiAFINN_NBpredTst[,2], levels=c(-1, 1))
+
+# Plot ROC Curves ####################################
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for AFINN NB Model ####################################
+
+AFINN_NBtrn_auc <- auc(as.numeric(revDTM_sentiAFINN_trn$hiLo), revSentiAFINN_NBpredTrn[,2])
+AFINN_NBtrn_auc
+
+AFINN_NBtst_auc <- auc(as.numeric(revDTM_sentiAFINN_tst$hiLo), revSentiAFINN_NBpredTst[,2])
+AFINN_NBtst_auc
+
+# Confusion Matrix of AFINN NB Model ####################################
+
+cmx <- table(actual=revDTM_sentiAFINN_trn$hiLo, preds=revSentiAFINN_NBpredTrn[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+AFINN_NBtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+AFINN_NBtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiAFINN_tst$hiLo, preds=revSentiAFINN_NBpredTst[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+AFINN_NBtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+AFINN_NBtst_accuracy
+
+```
+
+### Developing a GLMnet model using Lasso For AFINN Dictionary
+
+```{r GLMnet Model - AFINN}
+
+xDTrn <- revDTM_sentiAFINN_trn %>% select(-review_id, -hiLo)
+
+set.seed(100)
+glmAFINN_cv <- cv.glmnet(data.matrix(xDTrn), revDTM_sentiAFINN_trn$hiLo, family="binomial", type.measure = "auc", nfolds=5, alpha = 1)
+
+# Plot ROC Curves for AFINN Lasso Model ####################################
+
+predAFINNtrn_lasso = predict(glmAFINN_cv, data.matrix(revDTM_sentiAFINN_trn %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucAFINNtrn_lasso <- prediction(predAFINNtrn_lasso, revDTM_sentiAFINN_trn$hiLo)
+ROCPerfAFINNtrn_lasso <- performance(predsaucAFINNtrn_lasso, "tpr", "fpr")
+
+predAFINNtst_lasso = predict(glmAFINN_cv, data.matrix(revDTM_sentiAFINN_tst %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucAFINNtst_lasso <- prediction(predAFINNtst_lasso, revDTM_sentiAFINN_tst$hiLo)
+ROCPerfAFINNtst_lasso <- performance(predsaucAFINNtst_lasso, "tpr", "fpr")
+
+
+plot(ROCPerfAFINNtrn_lasso, col='blue', legacy.axes = TRUE)
+plot(ROCPerfAFINNtst_lasso, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+abline(a = 0, b = 1)
+
+# AUC Values for AFINN Lasso Model ####################################
+
+aucPerfAFINNtrn_lasso <- performance(predsaucAFINNtrn_lasso, "auc")
+aucPerfAFINNtrn_lasso@y.values
+AFINN_Lassotrn_auc<- aucPerfAFINNtrn_lasso@y.values
+
+aucPerfAFINNtst_lasso <- performance(predsaucAFINNtst_lasso, "auc")
+aucPerfAFINNtst_lasso@y.values
+AFINN_Lassotst_auc<- aucPerfAFINNtrn_lasso@y.values
+
+# Confusion Matrix for AFINN Lasso Model ####################################
+
+revSentiAFINN_LassopredTrn <- predict(glmAFINN_cv,  data.matrix(revDTM_sentiAFINN_trn %>% select(-review_id, -hiLo)), type = "class")
+revSentiAFINN_LassopredTst <- predict(glmAFINN_cv,  data.matrix(revDTM_sentiAFINN_tst %>% select(-review_id, -hiLo)), type = "class")
+
+cmx <- table(actual=revDTM_sentiAFINN_trn$hiLo, preds=revSentiAFINN_LassopredTrn)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+AFINN_Lassotrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+AFINN_Lassotrn_accuracy
+
+cmx <- table(actual=revDTM_sentiAFINN_tst$hiLo, preds=revSentiAFINN_LassopredTst)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+AFINN_Lassotst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+AFINN_Lassotst_accuracy
+
+```
+
+### Comparing the 3 RF Models
+
+```{r Comparing Dictionaries - RF}
+
+cat("RF Models")
+cat("\n")
+#Bing Dictionary
+cat("Bing RF Trn AUC", Bing_RFtrn_auc)
+cat("\n")
+cat("Bing RF Tst AUC", Bing_RFtst_auc)
+cat("\n")
+cat("Bing RF Trn Acc", Bing_RFtrn_accuracy)
+cat("\n")
+cat("Bing RF Tst Acc", Bing_RFtst_accuracy)
+cat("\n")
+
+#NRC Dictionary
+cat("NRC RF Trn AUC", NRC_RFtrn_auc)
+cat("\n")
+cat("NRC RF Tst AUC", NRC_RFtst_auc)
+cat("\n")
+cat("NRC RF Trn Acc", NRC_RFtrn_accuracy)
+cat("\n")
+cat("NRC RF Tst Acc", NRC_RFtst_accuracy)
+cat("\n")
+
+#AFINN Dictionary
+cat("AFINN RF Trn AUC", AFINN_RFtrn_auc)
+cat("\n")
+cat("AFINN RF Tst AUC", AFINN_RFtst_auc)
+cat("\n")
+cat("AFINN RF Trn Acc", AFINN_RFtrn_accuracy)
+cat("\n")
+cat("AFINN RF Tst Acc", AFINN_RFtst_accuracy)
+cat("\n")
+```
+Our Random Forest Models seem to perform much better compared to our Naive-Bayes and Lasso Models, with the accuracies for our models being 0.85 or higher, and the AUC values being 0.9 or higher. Out of all the Random Forest Models, our dataset using the Bing Dictionary has the best performance, with 0.887 Accuracy when tested against the Test Data, and 0.9196041 AUC when tested against the Test Data.
+
+### Comparing the 3 NB Models
+
+```{r Comparing Dictionaries - NB}
+
+cat("NB Models")
+cat("\n")
+#Bing Dictionary
+cat("Bing NB Trn AUC", Bing_NBtrn_auc)
+cat("\n")
+cat("Bing NB Tst AUC", Bing_NBtst_auc)
+cat("\n")
+cat("Bing NB Trn Acc", Bing_NBtrn_accuracy)
+cat("\n")
+cat("Bing NB Tst Acc", Bing_NBtst_accuracy)
+cat("\n")
+
+#NRC Dictionary
+cat("NRC NB Trn AUC", NRC_NBtrn_auc)
+cat("\n")
+cat("NRC NB Tst AUC", NRC_NBtst_auc)
+cat("\n")
+cat("NRC NB Trn Acc", NRC_NBtrn_accuracy)
+cat("\n")
+cat("NRC NB Tst Acc", NRC_NBtst_accuracy)
+cat("\n")
+
+#AFINN Dictionary
+cat("AFINN NB Trn AUC", AFINN_NBtrn_auc)
+cat("\n")
+cat("AFINN NB Tst AUC", AFINN_NBtst_auc)
+cat("\n")
+cat("AFINN NB Trn Acc", AFINN_NBtrn_accuracy)
+cat("\n")
+cat("AFINN NB Tst Acc", AFINN_NBtst_accuracy)
+cat("\n")
+```
+Our Naive-Bayes Models seem to perform significantly worse than our Random Forest and Lasso models, with some of the values dropping below 0.5. Out of the three dictionaries, it seems that the Bing Dictionary performs the best, and the NRC Dictionary seems to perform the worst.
+
+### Comparing the 3 Lasso Models
+
+```{r Comparing Dictionaries - Lasso}
+
+cat("Lasso Models")
+cat("\n")
+#Bing Dictionary
+cat("Bing Lasso Trn AUC", toString(Bing_Lassotrn_auc))
+cat("\n")
+cat("Bing Lasso Tst AUC", toString(Bing_Lassotst_auc))
+cat("\n")
+cat("Bing Lasso Trn Acc", Bing_Lassotrn_accuracy)
+cat("\n")
+cat("Bing Lasso Tst Acc", Bing_Lassotst_accuracy)
+cat("\n")
+
+#NRC Dictionary
+cat("NRC Lasso Trn AUC", toString(NRC_Lassotrn_auc))
+cat("\n")
+cat("NRC Lasso Tst AUC", toString(NRC_Lassotst_auc))
+cat("\n")
+cat("NRC Lasso Trn Acc", NRC_Lassotrn_accuracy)
+cat("\n")
+cat("NRC Lasso Tst Acc", NRC_Lassotst_accuracy)
+cat("\n")
+
+#AFINN Dictionary
+cat("AFINN Lasso Trn AUC", toString(AFINN_Lassotrn_auc))
+cat("\n")
+cat("AFINN Lasso Tst AUC", toString(AFINN_Lassotst_auc))
+cat("\n")
+cat("AFINN Lasso Trn Acc", AFINN_Lassotrn_accuracy)
+cat("\n")
+cat("AFINN Lasso Tst Acc", AFINN_Lassotst_accuracy)
+
+```
+The Lasso Models perform relatively well, with most of the models having at least 0.8 or more accuracy, and an AUC of 0.9 or more. From the list above, it seems that the Bing Dictionary performs the best, with the NRC Dictionary performing the worst. 
+
+# Combining All Three Dictionaries
+
+We updated the dataset by using a combination of all three dictionaries that are merged together using "left_join", and we use this combined dataset to train all three models (Random Forest, Naive-Bayes, and Lasso) again.
+
+```{r Combining Dictionaries}
+
+# Combine all dictionary terms.
+
+#combine; create rrTokens_com
+rrTokens_com <- rrTokens %>% left_join(get_sentiments("bing"), by="word")
+colnames(rrTokens_com)[8] <- "senti.bing"
+rrTokens_com <- rrTokens_com %>% left_join(get_sentiments("nrc"), by="word")
+colnames(rrTokens_com)[9] <- "senti.nrc"
+rrTokens_com <- rrTokens_com %>% left_join(get_sentiments("afinn"), by="word")
+colnames(rrTokens_com)[10] <- "senti.afinn"
+
+#mutate hiLo
+rrTokens_com <- rrTokens_com %>% mutate(hiLo=ifelse(stars<=2,-1, ifelse(stars>=4, 1, 0 ))) 
+
+#mutate hiLo.bing
+rrTokens_com <- rrTokens_com %>% mutate(hiLo.bing=ifelse(senti.bing=="positive", 1, -1)) 
+
+#mutate hiLo.nrc
+rrTokens_com <- rrTokens_com  %>% mutate(hiLo.nrc=ifelse(senti.nrc %in% c('anger', 'disgust', 'fear', 'sadness', 'negative'), -1, ifelse(senti.nrc %in% c('positive', 'joy', 'anticipation', 'trust'), 1, 0)))
+
+#mutate hiLo.afinn
+rrTokens_com <- rrTokens_com %>% mutate(hiLo.afinn=ifelse(senti.afinn >0, 1, -1)) 
+rrTokens_com <- rrTokens_com %>% select(-senti.bing, -senti.nrc,-senti.afinn)
+
+#replace NA with 0 
+rrTokens_com <- rrTokens_com %>% replace(., is.na(.), 0)
+#combine 3 dictionaries to get the sum value of all their hiLo scores
+rrTokens_com <- rrTokens_com %>% mutate(hiLo.com = hiLo.bing+hiLo.nrc+hiLo.afinn)
+
+#mutate comm, if the sum of the hiLo score is still negative, we will classify it as "-1" which indicates a negative sentiment, if the hiLo score is a positive number above 0, we will classify it as "1" which indicates a positive sentiment
+rrTokens_com <- rrTokens_com %>% mutate(hiLo.comm=ifelse(hiLo.com>0,1,ifelse(hiLo.com<0, -1, 0 ))) 
+
+#filter out unmatch words
+rrTokens_com <- rrTokens_com %>% filter(hiLo.comm != 0)
+
+rrTokens_com
+
+# What is the size of the document term matrix?
+dim(rrTokens_com)
+
+```
+
+## Combined Dictionary Model - Cleaning and Splitting Data
+
+```{r Cleaning Tst and Trn Data - Combined, message =FALSE, cache=TRUE}
+library(magrittr)
+library(dplyr)
+
+#remove hiLo columns
+rrSenti_com = select(rrTokens_com, -c("hiLo", "hiLo.bing", "hiLo.nrc", "hiLo.afinn", "hiLo.com","hiLo.comm"))
+
+#use pivot_wider to convert to a dtm form where each row is for a review and columns correspond to words
+
+#considering only those words which match a sentiment dictionary (for eg. bing)
+
+#ensuring all rows are distinct and not duplicates
+rrSenti_com <- rrSenti_com %>% distinct()
+
+revDTM_sentiCom <- rrSenti_com %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+
+#filter out the reviews with stars=3, and calculate hiLo sentiment 'class'
+revDTM_sentiCom <- revDTM_sentiCom %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#how many review with 1, -1  'class'
+revDTM_sentiCom %>% group_by(hiLo) %>% tally()
+
+#Cleaning data
+
+#replace all the NAs with 0
+revDTM_sentiCom<-revDTM_sentiCom %>% replace(., is.na(.), 0)
+
+```
+```{r Trn and Tst Split - Combined}
+#Splitting data into train and test
+
+revDTM_sentiCom$hiLo<- as.factor(revDTM_sentiCom$hiLo)
+set.seed(100)
+revDTM_sentiCom_reduced <- sample_n(revDTM_sentiCom, 10000)
+revDTM_sentiCom_reduced %>% group_by(hiLo) %>% tally()
+
+revDTM_sentiCom_split<- initial_split(revDTM_sentiCom_reduced, 0.7)
+revDTM_sentiCom_trn<- training(revDTM_sentiCom_split)
+revDTM_sentiCom_tst<- testing(revDTM_sentiCom_split)
+
+```
+
+### Developing a Random Forest Model For Combined Dictionary
+
+We decide to use a random forest model with 200 trees for faster computations as anything lower than that will likely give us a less accurate model.
+
+``` {r Random Forest Model - Combined}
+
+#develop a random forest model to predict hiLo from the words in the reviews
+
+rfModel4<-ranger(dependent.variable.name = "hiLo", data=revDTM_sentiCom_trn %>% select(-review_id), num.trees = 200, importance='permutation', probability = TRUE)
+
+#which variables are important
+importance(rfModel4) %>% view()
+
+# Obtain predictions, and calculate performance
+revSentiCom_predTrn<- predict(rfModel4, revDTM_sentiCom_trn %>% select(-review_id))$predictions
+revSentiCom_predTst<- predict(rfModel4, revDTM_sentiCom_tst %>% select(-review_id))$predictions
+
+# Plot ROC Curves ####################################
+
+rocTrn <- roc(revDTM_sentiCom_trn$hiLo, revSentiCom_predTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiCom_tst$hiLo, revSentiCom_predTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for Com RF model ####################################
+
+Com_RFtrn_auc <- auc(as.numeric(revDTM_sentiCom_trn$hiLo), revSentiCom_predTrn[,2])
+Com_RFtrn_auc
+
+Com_RFtst_auc <- auc(as.numeric(revDTM_sentiCom_tst$hiLo), revSentiCom_predTst[,2])
+Com_RFtst_auc
+
+# Confusion Matrix for Com RF Model ####################################
+
+cmx <- table(actual=revDTM_sentiCom_trn$hiLo, preds=revSentiCom_predTrn[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+Com_RFtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Com_RFtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiCom_tst$hiLo, preds=revSentiCom_predTst[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+Com_RFtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Com_RFtst_accuracy
+
+```
+
+The Accuracy of our RF model against our training set and testing set is 0.9804286 and 0.8683333 respectively. Our best Random Forest Model using Bing had a Accuracy of 0.9664286 and 0.887, so using the Combined Dictionary we seem to get a better score for our Random Forest Model when predicted against the training set, but have a slightly lower accuracy when predicted against the testing set. When using the AUC as a comparison measure, it shows a similar pattern between the Combined Dictionary and Bing Dictionary
+
+### Developing a Naive-Bayes Model for Combined Dictionary
+```{r Naive Bayes Model - Combined, message=FALSE, cache=TRUE}
+
+nbModel4<-naiveBayes(hiLo ~ ., data=revDTM_sentiCom_trn %>% select(-review_id))
+
+revSentiCom_NBpredTrn<-predict(nbModel4, revDTM_sentiCom_trn, type = "raw")
+revSentiCom_NBpredTst<-predict(nbModel4, revDTM_sentiCom_tst, type = "raw")
+
+rocTrn <- roc(revDTM_sentiCom_trn$hiLo, revSentiCom_NBpredTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiCom_tst$hiLo, revSentiCom_NBpredTst[,2], levels=c(-1, 1))
+
+# Plot ROC Curves ####################################
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for Com NB Model ####################################
+
+Com_NBtrn_auc <- auc(as.numeric(revDTM_sentiCom_trn$hiLo), revSentiCom_NBpredTrn[,2])
+Com_NBtrn_auc
+
+Com_NBtst_auc <- auc(as.numeric(revDTM_sentiCom_tst$hiLo), revSentiCom_NBpredTst[,2])
+Com_NBtst_auc
+
+# Confusion Matrix of Com NB Model ####################################
+
+cmx <- table(actual=revDTM_sentiCom_trn$hiLo, preds=revSentiCom_NBpredTrn[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Com_NBtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Com_NBtrn_accuracy
+
+cmx <- table(actual=revDTM_sentiCom_tst$hiLo, preds=revSentiCom_NBpredTst[,2]>0.5)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Com_NBtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Com_NBtst_accuracy
+
+```
+
+Similarly to the Naive Bayes models we developed earlier using the Bing, NRC, and AFINN Dictionaries, the Naive Bayes model for the Combined Dictionary shows very low performance values.While the AUCs are 0.604 and 0.6842, the accuracies are 0.3391429 and 0.3543333, which is not much better than random guessing.
+
+### Developing a GLMnet model using Lasso For Combined Dictionary
+```{r GLMnet Model - Combined}
+
+xDTrn <- revDTM_sentiCom_trn %>% select(-review_id, -hiLo)
+
+set.seed(100)
+glmCom_cv <- cv.glmnet(data.matrix(xDTrn), revDTM_sentiCom_trn$hiLo, family="binomial", type.measure = "auc", nfolds=5, alpha = 1)
+
+# Plot ROC Curves for Com Lasso Model ####################################
+
+predComtrn_lasso = predict(glmCom_cv, data.matrix(revDTM_sentiCom_trn %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucComtrn_lasso <- prediction(predComtrn_lasso, revDTM_sentiCom_trn$hiLo)
+ROCPerfComtrn_lasso <- performance(predsaucComtrn_lasso, "tpr", "fpr")
+
+predComtst_lasso = predict(glmCom_cv, data.matrix(revDTM_sentiCom_tst %>% select(-review_id, -hiLo)), s="lambda.1se", type="response")
+predsaucComtst_lasso <- prediction(predComtst_lasso, revDTM_sentiCom_tst$hiLo)
+ROCPerfComtst_lasso <- performance(predsaucComtst_lasso, "tpr", "fpr")
+
+
+plot(ROCPerfComtrn_lasso, col='blue', legacy.axes = TRUE)
+plot(ROCPerfComtst_lasso, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+abline(a = 0, b = 1)
+
+# AUC Values for Com Lasso Model ####################################
+
+aucPerfComtrn_lasso <- performance(predsaucComtrn_lasso, "auc")
+aucPerfComtrn_lasso@y.values
+Com_Lassotrn_auc <- aucPerfComtrn_lasso@y.values
+
+aucPerfComtst_lasso <- performance(predsaucComtst_lasso, "auc")
+aucPerfComtst_lasso@y.values
+Com_Lassotst_auc <- aucPerfComtst_lasso@y.values
+
+# Confusion Matrix for Com Lasso Model ####################################
+
+revSentiCom_LassopredTrn <- predict(glmCom_cv,  data.matrix(revDTM_sentiCom_trn %>% select(-review_id, -hiLo)), type = "class")
+revSentiCom_LassopredTst <- predict(glmCom_cv,  data.matrix(revDTM_sentiCom_tst %>% select(-review_id, -hiLo)), type = "class")
+
+cmx <- table(actual=revDTM_sentiCom_trn$hiLo, preds=revSentiCom_LassopredTrn)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Com_Lassotrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Com_Lassotrn_accuracy
+
+cmx <- table(actual=revDTM_sentiCom_tst$hiLo, preds=revSentiCom_LassopredTst)
+cmx
+#Calculate accuracy, specificity and precision based on confusion matrix
+Com_Lassotst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+Com_Lassotst_accuracy
+
+```
+
+The Lasso model for the combined dictionary performs slightly worse compared to our best Lasso model using the Bing Dictionary, While it has a slightly higher AUC of 0.9436392 compared to the AUC of 0.941897270642656 with Bing for predictions against the training set, it has slightly lower performance values for AUC using the training set and  for the two Accuracy values. Overall though, the performance for the Lasso models using the combined dictionary performs relatively well. 
+
+# (d) (ii) Develop a model on broader set of terms (not just those matching a sentiment dictionary)
+
+### How do you obtain these terms?
+We start in a similar way when we use the dictionaries by removing words that occur too often or not enough. We convert the remaining set of words into a Document Term Matrix (DTM). We remove 3 star ratings since it lies in the middle and we say anything 1 or 2 stars is negative and 4 or 5 stars is positive. We use this to create a dependent variable (HiLo) for our model to run on. We also want to replace NA values with 0’s so our model won’t run into errors. Then we split our data in half again to make it manageable to run our model against the Trn and Tst data. 
+
+### Will you use stemming here? 
+No we will not use stemming so we can see what words are being used in the reviews.
+
+```{r Model On Broader Set of Terms, message=FALSE, cache=TRUE}
+
+#if we want to remove the words which are there in too many or too few of the reviews
+#First find out how many reviews each word occurs in
+rWords<-rrTokens %>% group_by(word) %>% summarise(nr=n()) %>% arrange(desc(nr))
+
+#How many words are there
+length(rWords$word)
+
+top_n(rWords, 20)
+top_n(rWords, -20)
+
+#Suppose we want to remove words which occur in > 90% of reviews, and those which are in, for example, less than 30 reviews
+reduced_rWords<-rWords %>% filter(nr< 6000 & nr > 30)
+length(reduced_rWords$word)
+
+#reduce the rrTokens data to keep only the reduced set of words
+reduced_rrTokens <- left_join(reduced_rWords, rrTokens)
+
+#Now convert it to a DTM, where each row is for a review (document), and columns are the terms (words)
+revDTM  <- reduced_rrTokens %>%  pivot_wider(id_cols = c(review_id,stars), names_from = word, values_from = tf_idf)  %>% ungroup()
+
+#Check
+dim(revDTM)
+  #do the numberof columsnmatch the words -- we should also have the stars column and the review_id
+
+#create the dependent variable hiLo of good/bad reviews absed on stars, and remove the review with stars=3
+revDTM <- revDTM %>% filter(stars!=3) %>% mutate(hiLo=ifelse(stars<=2, -1, 1)) %>% select(-stars)
+
+#replace NAs with 0s
+revDTM<-revDTM %>% replace(., is.na(.), 0)
+
+revDTM$hiLo<-as.factor(revDTM$hiLo)
+
+revDTM_split<- initial_split(revDTM, 0.5)
+revDTM_trn<- training(revDTM_split)
+revDTM_tst<- testing(revDTM_split)
+
+#this can take some time...the importance ='permutation' takes time (we know why)
+rfModel5<-ranger(dependent.variable.name = "hiLo", data=revDTM_trn %>% select(-review_id), num.trees = 200, importance='permutation', probability = TRUE)
+
+rfModel5
+
+nbModel4<-naiveBayes(hiLo ~ ., data=revDTM_sentiCom_trn %>% select(-review_id))
+
+revSentiCom_NBpredTrn<-predict(nbModel4, revDTM_sentiCom_trn, type = "raw")
+revSentiCom_NBpredTst<-predict(nbModel4, revDTM_sentiCom_tst, type = "raw")
+
+rocTrn <- roc(revDTM_sentiCom_trn$hiLo, revSentiCom_NBpredTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_sentiCom_tst$hiLo, revSentiCom_NBpredTst[,2], levels=c(-1, 1))
+
+# Plot ROC Curves ####################################
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for Com NB Model ####################################
+
+Com_NBtrn_auc <- auc(as.numeric(revDTM_sentiCom_trn$hiLo), revSentiCom_NBpredTrn[,2])
+Com_NBtrn_auc
+
+Com_NBtst_auc <- auc(as.numeric(revDTM_sentiCom_tst$hiLo), revSentiCom_NBpredTst[,2])
+Com_NBtst_auc
+
+# Obtain predictions, and calculate performance
+rev_predTrn<- predict(rfModel5, revDTM_trn %>% select(-review_id))$predictions
+rev_predTst<- predict(rfModel5, revDTM_tst %>% select(-review_id))$predictions
+
+# Plot ROC Curves ####################################
+
+rocTrn <- roc(revDTM_trn$hiLo, rev_predTrn[,2], levels=c(-1, 1))
+rocTst <- roc(revDTM_tst$hiLo, rev_predTst[,2], levels=c(-1, 1))
+
+plot.roc(rocTrn, col='blue', legacy.axes = TRUE)
+plot.roc(rocTst, col='red', add=TRUE)
+legend("bottomright", legend=c("Training", "Test"),
+        col=c("blue", "red"), lwd=2, cex=0.8, bty='n')
+
+# AUC Values for Com RF model ####################################
+
+RFtrn_auc <- auc(as.numeric(revDTM_trn$hiLo), rev_predTrn[,2])
+RFtrn_auc
+
+RFtst_auc <- auc(as.numeric(revDTM_tst$hiLo), rev_predTst[,2])
+RFtst_auc
+
+# Confusion Matrix for Com RF Model ####################################
+
+cmx <- table(actual=revDTM_trn$hiLo, preds=rev_predTrn[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+RFtrn_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+RFtrn_accuracy
+
+cmx <- table(actual=revDTM_tst$hiLo, preds=rev_predTst[,2]>0.5)
+cmx
+#Calculate accuracy based on confusion matrix
+RFtst_accuracy <- (cmx[1]+cmx[4])/(cmx[1]+cmx[2]+cmx[3]+cmx[4])
+RFtst_accuracy
+
+```
+
+### Report on performance of the models.
+The accuracy of our training data is 99.7% and our testing data accuracy is 89.8% 
+
+### Compare performance with that in part (c) above.
+Since the accuracy of the Bing and NRC dictionaries were both below 80% when we considered (1,2,4,5) and (1,5) star reviews we will focus on the AFINN dictionary when comparing. The accuracy of AFINN was 83.52% accurate when considering (1,2,4,5) star reviews and AFINN was 87.95% accurate when considering (1,5) star reviews. Comparing these findings from part C with the model using a broader list of terms we see that our broader terms model performs better with higher accuracy. 
+
+### How do you evaluate performance? Which performance measures do you use, why.
+Similarly to our previous models, we use AUC and Accuracy as the performance measures to test whether the model is able to correctly classify both “negative” and “positive” words/terms. As stated previously, we feel that AUC is a good measure as it tells how much the model is capable of distinguishing between the classes, which in this case are "negative" and "positive" sentiments. The higher the AUC, the better the model is at predicting "negative"s as "negative"s and "positive"s as "positive"s. And since our aim is to predict both "negative" and "positive" sentiments, we feel that Accuracy, which is (TP + TN)/(TP + TN + FP + FN), will give us a good sense of how well our Models are able to predict both "negative" and "positive" sentiments.
+
+
+
+
+
+
+
